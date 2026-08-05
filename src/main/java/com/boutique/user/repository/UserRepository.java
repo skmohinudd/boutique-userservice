@@ -1,0 +1,16 @@
+package com.boutique.user.repository;
+
+import com.boutique.user.entity.User;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.Optional;
+import java.util.UUID;
+
+public interface UserRepository extends JpaRepository<User, UUID> {
+
+    boolean existsByEmailIgnoreCase(String email);
+
+    boolean existsByCognitoSub(String cognitoSub);
+
+    Optional<User> findByCognitoSub(String cognitoSub);
+}
