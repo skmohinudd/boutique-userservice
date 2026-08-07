@@ -7,10 +7,5 @@ import java.util.Optional;
 import java.util.UUID;
 
 public interface UserRepository extends JpaRepository<User, UUID> {
-
-    boolean existsByEmailIgnoreCase(String email);
-
-    boolean existsByCognitoSub(String cognitoSub);
-
     Optional<User> findByCognitoSub(String cognitoSub);
 }

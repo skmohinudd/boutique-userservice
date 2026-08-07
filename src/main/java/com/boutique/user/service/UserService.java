@@ -9,6 +9,7 @@ import com.boutique.user.exception.DuplicateUserException;
 import com.boutique.user.exception.UserNotFoundException;
 import com.boutique.user.exception.UserStateConflictException;
 import com.boutique.user.repository.UserRepository;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -29,14 +30,6 @@ public class UserService {
         String email = normalizeEmail(request.email());
         String cognitoSub = normalizeNullable(request.cognitoSub());
 
-        if (userRepository.existsByEmailIgnoreCase(email)) {
-            throw new DuplicateUserException("A user already exists with email: " + email);
-        }
-
-        if (cognitoSub != null && userRepository.existsByCognitoSub(cognitoSub)) {
-            throw new DuplicateUserException("A user already exists for the supplied Cognito identity.");
-        }
-
         User user = new User(
                 UUID.randomUUID(),
                 cognitoSub,
@@ -47,7 +40,16 @@ public class UserService {
                 UserStatus.ACTIVE
         );
 
-        return toResponse(userRepository.save(user));
+        try {
+            // The database UNIQUE constraints are authoritative and race-safe.
+            // saveAndFlush forces duplicate detection inside this request instead
+            // of issuing two existence SELECTs before every INSERT.
+            return toResponse(userRepository.saveAndFlush(user));
+        } catch (DataIntegrityViolationException exception) {
+            throw new DuplicateUserException(
+                    "A user already exists with the supplied email or Cognito identity."
+            );
+        }
     }
 
     @Transactional(readOnly = true)

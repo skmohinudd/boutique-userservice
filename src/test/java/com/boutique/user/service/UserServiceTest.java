@@ -6,8 +6,7 @@ import com.boutique.user.entity.User;
 import com.boutique.user.exception.DuplicateUserException;
 import com.boutique.user.repository.UserRepository;
 import org.junit.jupiter.api.Test;
-
-import java.util.UUID;
+import org.springframework.dao.DataIntegrityViolationException;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -20,6 +19,7 @@ class UserServiceTest {
 
     @Test
     void createsNormalizedActiveUser() {
+
         CreateUserRequest request = new CreateUserRequest(
                 "  KHAJA@example.com ",
                 " Khaja ",
@@ -28,8 +28,8 @@ class UserServiceTest {
                 null
         );
 
-        when(repository.existsByEmailIgnoreCase("khaja@example.com")).thenReturn(false);
-        when(repository.save(any(User.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(repository.saveAndFlush(any(User.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
 
         UserResponse response = service.createUser(request);
 
@@ -37,12 +37,15 @@ class UserServiceTest {
         assertEquals("Khaja", response.firstName());
         assertEquals("Mohinuddin", response.lastName());
         assertNotNull(response.id());
-        verify(repository).save(any(User.class));
+
+        verify(repository, times(1))
+                .saveAndFlush(any(User.class));
+
+        verifyNoMoreInteractions(repository);
     }
 
     @Test
-    void rejectsDuplicateEmail() {
-        when(repository.existsByEmailIgnoreCase("khaja@example.com")).thenReturn(true);
+    void rejectsDuplicateUserWhenDatabaseUniqueConstraintFails() {
 
         CreateUserRequest request = new CreateUserRequest(
                 "khaja@example.com",
@@ -52,7 +55,19 @@ class UserServiceTest {
                 null
         );
 
-        assertThrows(DuplicateUserException.class, () -> service.createUser(request));
-        verify(repository, never()).save(any());
+        when(repository.saveAndFlush(any(User.class)))
+                .thenThrow(new DataIntegrityViolationException(
+                        "duplicate key violates unique constraint"
+                ));
+
+        assertThrows(
+                DuplicateUserException.class,
+                () -> service.createUser(request)
+        );
+
+        verify(repository, times(1))
+                .saveAndFlush(any(User.class));
+
+        verifyNoMoreInteractions(repository);
     }
 }
