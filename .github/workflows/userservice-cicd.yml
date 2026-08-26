@@ -1,0 +1,559 @@
+name: User Service CI/CD
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+concurrency:
+  group: userservice-${{ github.ref }}
+  cancel-in-progress: false
+
+# Required for checkout and AWS OIDC.
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  SERVICE_NAME: userservice
+
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: "663130434910"
+
+  ECR_REPOSITORY: boutique-userservice
+
+  EKS_CLUSTER_NAME: boutique-dev-eks
+  K8S_NAMESPACE: boutique
+
+  HELM_RELEASE: user-dev
+  K8S_DEPLOYMENT: userservice
+  K8S_SERVICE: userservice
+
+  PLATFORM_REPOSITORY: skmohinudd/boutique-platform-infra
+  HELM_CHART_PATH: boutique-platform-infra/helm/userservice
+
+  SONAR_PROJECT_KEY: boutique-userservice
+  SONAR_PROJECT_NAME: Boutique User Service
+
+
+jobs:
+
+  # PR validates code only. Nothing is published or deployed.
+  pr-validation:
+    name: Validate User Service
+
+    if: github.event_name == 'pull_request'
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 15
+
+    steps:
+
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+
+      - name: Run tests
+        env:
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+
+        run: |
+          sed -i 's/\r$//' mvnw
+          chmod +x mvnw
+
+          if ./mvnw \
+            -q \
+            --batch-mode \
+            --no-transfer-progress \
+            -s .mvn/nexus-settings.xml \
+            clean test \
+            > /tmp/test.log 2>&1
+          then
+            echo "Tests passed"
+          else
+            echo "Tests failed"
+            tail -n 80 /tmp/test.log
+            exit 1
+          fi
+
+
+      - name: SonarQube analysis
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+
+        run: |
+          if ./mvnw \
+            -q \
+            --batch-mode \
+            --no-transfer-progress \
+            -s .mvn/nexus-settings.xml \
+            org.sonarsource.scanner.maven:sonar-maven-plugin:5.7.0.6970:sonar \
+            -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
+            -Dsonar.projectName="$SONAR_PROJECT_NAME" \
+            -Dsonar.host.url="$SONAR_HOST_URL" \
+            -Dsonar.token="$SONAR_TOKEN" \
+            > /tmp/sonar.log 2>&1
+          then
+            echo "SonarQube analysis completed"
+          else
+            echo "SonarQube analysis failed"
+            tail -n 80 /tmp/sonar.log
+            exit 1
+          fi
+
+
+  # Push/manual run on main performs complete CI/CD.
+  deploy-main:
+    name: Build and Deploy User Service
+
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' ||
+       github.event_name == 'workflow_dispatch')
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 30
+
+    steps:
+
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+
+      # Same version is used for JAR, Nexus, Sonar, ECR and Helm.
+      - name: Generate version
+        run: |
+          sed -i 's/\r$//' mvnw
+          chmod +x mvnw
+
+          APP_VERSION="1.0.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+
+          echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
+
+          ./mvnw \
+            -q \
+            --batch-mode \
+            --no-transfer-progress \
+            versions:set \
+            -DnewVersion="$APP_VERSION" \
+            -DgenerateBackupPoms=false \
+            > /tmp/version.log 2>&1 \
+            || {
+              tail -n 60 /tmp/version.log
+              exit 1
+            }
+
+          echo "Version: $APP_VERSION"
+
+
+      - name: Test and build JAR
+        env:
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+
+        run: |
+          if ./mvnw \
+            -q \
+            --batch-mode \
+            --no-transfer-progress \
+            -s .mvn/nexus-settings.xml \
+            clean package \
+            > /tmp/build.log 2>&1
+          then
+            JAR_NAME="${SERVICE_NAME}-${APP_VERSION}.jar"
+
+            test -f "target/$JAR_NAME"
+
+            echo "JAR_NAME=$JAR_NAME" >> "$GITHUB_ENV"
+
+            echo "Build passed: $JAR_NAME"
+          else
+            echo "Build failed"
+            tail -n 100 /tmp/build.log
+            exit 1
+          fi
+
+
+      - name: SonarQube analysis
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+
+        run: |
+          if ./mvnw \
+            -q \
+            --batch-mode \
+            --no-transfer-progress \
+            -s .mvn/nexus-settings.xml \
+            org.sonarsource.scanner.maven:sonar-maven-plugin:5.7.0.6970:sonar \
+            -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
+            -Dsonar.projectName="$SONAR_PROJECT_NAME" \
+            -Dsonar.projectVersion="$APP_VERSION" \
+            -Dsonar.host.url="$SONAR_HOST_URL" \
+            -Dsonar.token="$SONAR_TOKEN" \
+            > /tmp/sonar.log 2>&1
+          then
+            echo "SonarQube analysis completed"
+          else
+            echo "SonarQube analysis failed"
+            tail -n 80 /tmp/sonar.log
+            exit 1
+          fi
+
+
+      - name: Publish JAR to Nexus
+        env:
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+
+        run: |
+          if ./mvnw \
+            -q \
+            --batch-mode \
+            --no-transfer-progress \
+            -s .mvn/nexus-settings.xml \
+            deploy \
+            -DskipTests \
+            > /tmp/nexus.log 2>&1
+          then
+            echo "Nexus artifact published"
+          else
+            echo "Nexus publish failed"
+            tail -n 80 /tmp/nexus.log
+            exit 1
+          fi
+
+
+      # GitHub OIDC assumes the shared backend IAM role.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: userservice-${{ github.run_id }}
+          allowed-account-ids: "663130434910"
+
+
+      - name: Validate AWS and ECR
+        run: |
+          ACCOUNT="$(aws sts get-caller-identity \
+            --query Account \
+            --output text)"
+
+          test "$ACCOUNT" = "$AWS_ACCOUNT_ID"
+
+          aws ecr describe-repositories \
+            --repository-names "$ECR_REPOSITORY" \
+            --region "$AWS_REGION" \
+            > /dev/null
+
+          echo "AWS and ECR verified"
+
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+
+      - name: Build Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+
+        run: |
+          IMAGE_REPOSITORY="${ECR_REGISTRY}/${ECR_REPOSITORY}"
+          IMAGE_URI="${IMAGE_REPOSITORY}:${APP_VERSION}"
+
+          echo "IMAGE_REPOSITORY=$IMAGE_REPOSITORY" >> "$GITHUB_ENV"
+          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
+
+          if docker build \
+            --quiet \
+            --label "org.opencontainers.image.version=$APP_VERSION" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            -t "$IMAGE_URI" \
+            . \
+            > /tmp/docker.log 2>&1
+          then
+            echo "Docker image built"
+          else
+            echo "Docker build failed"
+            tail -n 80 /tmp/docker.log
+            exit 1
+          fi
+
+
+      # Trivy intentionally disabled until the S3 report flow is finalized.
+
+
+      - name: Push image to ECR
+        run: |
+          if docker push \
+            --quiet \
+            "$IMAGE_URI" \
+            > /tmp/ecr.log 2>&1
+          then
+            echo "ECR image pushed"
+          else
+            echo "ECR push failed"
+            tail -n 80 /tmp/ecr.log
+            exit 1
+          fi
+
+          IMAGE_DIGEST="$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag="$APP_VERSION" \
+            --region "$AWS_REGION" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)"
+
+          test -n "$IMAGE_DIGEST"
+          test "$IMAGE_DIGEST" != "None"
+
+          echo "IMAGE_DIGEST=$IMAGE_DIGEST" >> "$GITHUB_ENV"
+
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v5.1.0
+
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v5.0.0
+
+
+      # Kubernetes manifests are owned by the central platform repository.
+      - name: Checkout platform repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PLATFORM_REPOSITORY }}
+          path: boutique-platform-infra
+          persist-credentials: false
+
+
+      - name: Validate Helm chart
+        run: |
+          if helm lint \
+            "$HELM_CHART_PATH" \
+            > /tmp/helm-lint.log 2>&1
+          then
+            echo "Helm lint passed"
+          else
+            tail -n 80 /tmp/helm-lint.log
+            exit 1
+          fi
+
+          if helm template \
+            "$HELM_RELEASE" \
+            "$HELM_CHART_PATH" \
+            --namespace "$K8S_NAMESPACE" \
+            --set image.repository="$IMAGE_REPOSITORY" \
+            --set image.tag="$APP_VERSION" \
+            > /tmp/userservice.yaml \
+            2> /tmp/helm-template.log
+          then
+            echo "Helm rendering passed"
+          else
+            tail -n 80 /tmp/helm-template.log
+            exit 1
+          fi
+
+
+      - name: Configure EKS access
+        run: |
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "$EKS_CLUSTER_NAME" \
+            > /dev/null
+
+          kubectl get namespace "$K8S_NAMESPACE" > /dev/null
+
+          echo "EKS access verified"
+
+
+      # Rolling update keeps old Pods until new Pods become Ready.
+      # --atomic automatically rolls back a failed release.
+      - name: Deploy with Helm
+        run: |
+          CURRENT_IMAGE="$(kubectl get deployment \
+            "$K8S_DEPLOYMENT" \
+            -n "$K8S_NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[0].image}' \
+            2>/dev/null || true)"
+
+          echo "Previous image: ${CURRENT_IMAGE:-not-deployed}"
+          echo "New image     : $IMAGE_URI"
+
+          if helm upgrade \
+            --install \
+            "$HELM_RELEASE" \
+            "$HELM_CHART_PATH" \
+            --namespace "$K8S_NAMESPACE" \
+            --set image.repository="$IMAGE_REPOSITORY" \
+            --set image.tag="$APP_VERSION" \
+            --atomic \
+            --cleanup-on-fail \
+            --history-max 5 \
+            --wait \
+            --timeout 5m \
+            > /tmp/helm-deploy.log 2>&1
+          then
+            echo "Helm deployment completed"
+          else
+            echo "Helm deployment failed"
+            tail -n 100 /tmp/helm-deploy.log
+
+            kubectl get pods \
+              -n "$K8S_NAMESPACE" \
+              -l app="$SERVICE_NAME" \
+              -o wide \
+              || true
+
+            exit 1
+          fi
+
+
+      - name: Validate deployment
+        run: |
+          kubectl rollout status \
+            deployment/"$K8S_DEPLOYMENT" \
+            -n "$K8S_NAMESPACE" \
+            --timeout=180s \
+            > /dev/null
+
+          DEPLOYED_IMAGE="$(kubectl get deployment \
+            "$K8S_DEPLOYMENT" \
+            -n "$K8S_NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')"
+
+          test "$DEPLOYED_IMAGE" = "$IMAGE_URI"
+
+          READY="$(kubectl get deployment \
+            "$K8S_DEPLOYMENT" \
+            -n "$K8S_NAMESPACE" \
+            -o jsonpath='{.status.readyReplicas}')"
+
+          DESIRED="$(kubectl get deployment \
+            "$K8S_DEPLOYMENT" \
+            -n "$K8S_NAMESPACE" \
+            -o jsonpath='{.spec.replicas}')"
+
+          test "${READY:-0}" = "$DESIRED"
+
+          echo "Deployment ready: ${READY}/${DESIRED}"
+
+
+      - name: Validate Service and health
+        run: |
+          kubectl get service \
+            "$K8S_SERVICE" \
+            -n "$K8S_NAMESPACE" \
+            > /dev/null
+
+          SERVICE_PORT="$(kubectl get service \
+            "$K8S_SERVICE" \
+            -n "$K8S_NAMESPACE" \
+            -o jsonpath='{.spec.ports[0].port}')"
+
+          ENDPOINTS="$(kubectl get endpointslice \
+            -n "$K8S_NAMESPACE" \
+            -l kubernetes.io/service-name="$K8S_SERVICE" \
+            -o jsonpath='{range .items[*].endpoints[*]}{.addresses[0]}{" "}{end}')"
+
+          test -n "$ENDPOINTS"
+
+          TEST_POD="userservice-health-${GITHUB_RUN_ID}"
+
+          cleanup() {
+            kubectl delete pod \
+              "$TEST_POD" \
+              -n "$K8S_NAMESPACE" \
+              --ignore-not-found \
+              > /dev/null 2>&1 || true
+          }
+
+          trap cleanup EXIT
+
+          kubectl run \
+            "$TEST_POD" \
+            --restart=Never \
+            --image=curlimages/curl \
+            -n "$K8S_NAMESPACE" \
+            --command -- \
+            curl \
+            --fail \
+            --silent \
+            --retry 5 \
+            --retry-delay 3 \
+            "http://${K8S_SERVICE}:${SERVICE_PORT}/actuator/health" \
+            > /dev/null
+
+          kubectl wait \
+            --for=jsonpath='{.status.phase}'=Succeeded \
+            pod/"$TEST_POD" \
+            -n "$K8S_NAMESPACE" \
+            --timeout=120s \
+            > /dev/null
+
+          HEALTH="$(kubectl logs \
+            "$TEST_POD" \
+            -n "$K8S_NAMESPACE")"
+
+          echo "$HEALTH" | grep -q '"status":"UP"'
+
+          echo "User Service health: UP"
+
+
+      - name: Deployment summary
+        run: |
+          REVISION="$(helm history \
+            "$HELM_RELEASE" \
+            -n "$K8S_NAMESPACE" \
+            -o json \
+            | jq -r '.[-1].revision')"
+
+          echo "----------------------------------------"
+          echo "User Service deployment completed"
+          echo "Version       : $APP_VERSION"
+          echo "Nexus JAR     : $JAR_NAME"
+          echo "ECR image     : $IMAGE_URI"
+          echo "ECR digest    : $IMAGE_DIGEST"
+          echo "Helm release  : $HELM_RELEASE"
+          echo "Helm revision : $REVISION"
+          echo "EKS deployment: $K8S_DEPLOYMENT"
+          echo "Health        : UP"
+          echo "----------------------------------------"
