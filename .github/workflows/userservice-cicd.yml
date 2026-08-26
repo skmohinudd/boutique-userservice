@@ -15,7 +15,7 @@ concurrency:
   group: userservice-${{ github.ref }}
   cancel-in-progress: false
 
-# Required for checkout and AWS OIDC.
+# Required for checkout and GitHub OIDC -> AWS.
 permissions:
   contents: read
   id-token: write
@@ -38,20 +38,20 @@ env:
   PLATFORM_REPOSITORY: skmohinudd/boutique-platform-infra
   HELM_CHART_PATH: boutique-platform-infra/helm/userservice
 
+  SONAR_HOST_URL: http://44.199.205.21:9000
   SONAR_PROJECT_KEY: boutique-userservice
   SONAR_PROJECT_NAME: Boutique User Service
 
 
 jobs:
 
-  # PR validates code only. Nothing is published or deployed.
+  # Pull requests validate code but never publish or deploy.
   pr-validation:
     name: Validate User Service
 
     if: github.event_name == 'pull_request'
 
     runs-on: ubuntu-latest
-
     timeout-minutes: 15
 
     steps:
@@ -70,15 +70,18 @@ jobs:
           cache: maven
 
 
+      - name: Prepare Maven
+        run: |
+          sed -i 's/\r$//' mvnw
+          chmod +x mvnw
+
+
       - name: Run tests
         env:
           NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
           NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
 
         run: |
-          sed -i 's/\r$//' mvnw
-          chmod +x mvnw
-
           if ./mvnw \
             -q \
             --batch-mode \
@@ -95,10 +98,22 @@ jobs:
           fi
 
 
-      - name: SonarQube analysis
+      - name: Validate SonarQube server
+        run: |
+          case "$SONAR_HOST_URL" in
+            http://*|https://*)
+              echo "SonarQube URL format valid"
+              ;;
+            *)
+              echo "Invalid SonarQube URL"
+              exit 1
+              ;;
+          esac
+
+
+      - name: Run SonarQube analysis
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
           NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
           NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
@@ -124,7 +139,7 @@ jobs:
           fi
 
 
-  # Push/manual run on main performs complete CI/CD.
+  # Push/manual execution on main performs the complete deployment.
   deploy-main:
     name: Build and Deploy User Service
 
@@ -134,7 +149,6 @@ jobs:
        github.event_name == 'workflow_dispatch')
 
     runs-on: ubuntu-latest
-
     timeout-minutes: 30
 
     steps:
@@ -153,8 +167,8 @@ jobs:
           cache: maven
 
 
-      # Same version is used for JAR, Nexus, Sonar, ECR and Helm.
-      - name: Generate version
+      # Same immutable version is used by Maven, Nexus, Sonar, ECR and Helm.
+      - name: Generate application version
         run: |
           sed -i 's/\r$//' mvnw
           chmod +x mvnw
@@ -163,20 +177,21 @@ jobs:
 
           echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
 
-          ./mvnw \
+          if ./mvnw \
             -q \
             --batch-mode \
             --no-transfer-progress \
             versions:set \
             -DnewVersion="$APP_VERSION" \
             -DgenerateBackupPoms=false \
-            > /tmp/version.log 2>&1 \
-            || {
-              tail -n 60 /tmp/version.log
-              exit 1
-            }
-
-          echo "Version: $APP_VERSION"
+            > /tmp/version.log 2>&1
+          then
+            echo "Version: $APP_VERSION"
+          else
+            echo "Maven version update failed"
+            tail -n 60 /tmp/version.log
+            exit 1
+          fi
 
 
       - name: Test and build JAR
@@ -207,10 +222,22 @@ jobs:
           fi
 
 
-      - name: SonarQube analysis
+      - name: Validate SonarQube server
+        run: |
+          case "$SONAR_HOST_URL" in
+            http://*|https://*)
+              echo "SonarQube URL format valid"
+              ;;
+            *)
+              echo "Invalid SonarQube URL"
+              exit 1
+              ;;
+          esac
+
+
+      - name: Run SonarQube analysis
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
           NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
           NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
@@ -252,7 +279,7 @@ jobs:
             -DskipTests \
             > /tmp/nexus.log 2>&1
           then
-            echo "Nexus artifact published"
+            echo "Nexus artifact published: $JAR_NAME"
           else
             echo "Nexus publish failed"
             tail -n 80 /tmp/nexus.log
@@ -260,7 +287,7 @@ jobs:
           fi
 
 
-      # GitHub OIDC assumes the shared backend IAM role.
+      # OIDC gives the workflow temporary AWS credentials.
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.2.3
         with:
@@ -286,7 +313,7 @@ jobs:
           echo "AWS and ECR verified"
 
 
-      - name: Login to ECR
+      - name: Login to Amazon ECR
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
@@ -318,10 +345,10 @@ jobs:
           fi
 
 
-      # Trivy intentionally disabled until the S3 report flow is finalized.
+      # Trivy intentionally disabled until the S3 reporting design is added.
 
 
-      - name: Push image to ECR
+      - name: Push Docker image to ECR
         run: |
           if docker push \
             --quiet \
@@ -356,7 +383,7 @@ jobs:
         uses: azure/setup-helm@v5.0.0
 
 
-      # Kubernetes manifests are owned by the central platform repository.
+      # Helm charts are stored in the central platform repository.
       - name: Checkout platform repository
         uses: actions/checkout@v4
         with:
@@ -367,12 +394,16 @@ jobs:
 
       - name: Validate Helm chart
         run: |
+          test -f "$HELM_CHART_PATH/Chart.yaml"
+          test -f "$HELM_CHART_PATH/values.yaml"
+
           if helm lint \
             "$HELM_CHART_PATH" \
             > /tmp/helm-lint.log 2>&1
           then
             echo "Helm lint passed"
           else
+            echo "Helm lint failed"
             tail -n 80 /tmp/helm-lint.log
             exit 1
           fi
@@ -383,14 +414,17 @@ jobs:
             --namespace "$K8S_NAMESPACE" \
             --set image.repository="$IMAGE_REPOSITORY" \
             --set image.tag="$APP_VERSION" \
-            > /tmp/userservice.yaml \
+            > /tmp/userservice-rendered.yaml \
             2> /tmp/helm-template.log
           then
             echo "Helm rendering passed"
           else
+            echo "Helm rendering failed"
             tail -n 80 /tmp/helm-template.log
             exit 1
           fi
+
+          test -s /tmp/userservice-rendered.yaml
 
 
       - name: Configure EKS access
@@ -400,14 +434,15 @@ jobs:
             --name "$EKS_CLUSTER_NAME" \
             > /dev/null
 
-          kubectl get namespace "$K8S_NAMESPACE" > /dev/null
+          kubectl get namespace \
+            "$K8S_NAMESPACE" \
+            > /dev/null
 
           echo "EKS access verified"
 
 
-      # Rolling update keeps old Pods until new Pods become Ready.
-      # --atomic automatically rolls back a failed release.
-      - name: Deploy with Helm
+      # Helm performs a rolling update. --atomic rolls back failed upgrades.
+      - name: Deploy User Service with Helm
         run: |
           CURRENT_IMAGE="$(kubectl get deployment \
             "$K8S_DEPLOYMENT" \
@@ -435,6 +470,7 @@ jobs:
             echo "Helm deployment completed"
           else
             echo "Helm deployment failed"
+
             tail -n 100 /tmp/helm-deploy.log
 
             kubectl get pods \
@@ -447,20 +483,32 @@ jobs:
           fi
 
 
-      - name: Validate deployment
+      - name: Validate Kubernetes deployment
         run: |
-          kubectl rollout status \
+          if kubectl rollout status \
             deployment/"$K8S_DEPLOYMENT" \
             -n "$K8S_NAMESPACE" \
             --timeout=180s \
-            > /dev/null
+            > /tmp/rollout.log 2>&1
+          then
+            echo "Kubernetes rollout completed"
+          else
+            echo "Kubernetes rollout failed"
+            tail -n 80 /tmp/rollout.log
+            exit 1
+          fi
 
           DEPLOYED_IMAGE="$(kubectl get deployment \
             "$K8S_DEPLOYMENT" \
             -n "$K8S_NAMESPACE" \
             -o jsonpath='{.spec.template.spec.containers[0].image}')"
 
-          test "$DEPLOYED_IMAGE" = "$IMAGE_URI"
+          if [[ "$DEPLOYED_IMAGE" != "$IMAGE_URI" ]]
+          then
+            echo "Expected: $IMAGE_URI"
+            echo "Running : $DEPLOYED_IMAGE"
+            exit 1
+          fi
 
           READY="$(kubectl get deployment \
             "$K8S_DEPLOYMENT" \
@@ -477,7 +525,7 @@ jobs:
           echo "Deployment ready: ${READY}/${DESIRED}"
 
 
-      - name: Validate Service and health
+      - name: Validate Service endpoints
         run: |
           kubectl get service \
             "$K8S_SERVICE" \
@@ -496,6 +544,13 @@ jobs:
 
           test -n "$ENDPOINTS"
 
+          echo "Service endpoints verified"
+          echo "SERVICE_PORT=$SERVICE_PORT" >> "$GITHUB_ENV"
+
+
+      # Test through Kubernetes DNS -> Service -> Pod.
+      - name: Validate User Service health
+        run: |
           TEST_POD="userservice-health-${GITHUB_RUN_ID}"
 
           cleanup() {
@@ -533,9 +588,14 @@ jobs:
             "$TEST_POD" \
             -n "$K8S_NAMESPACE")"
 
-          echo "$HEALTH" | grep -q '"status":"UP"'
-
-          echo "User Service health: UP"
+          if echo "$HEALTH" | grep -q '"status":"UP"'
+          then
+            echo "User Service health: UP"
+          else
+            echo "User Service health check failed"
+            echo "$HEALTH"
+            exit 1
+          fi
 
 
       - name: Deployment summary
