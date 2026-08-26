@@ -548,7 +548,7 @@ jobs:
           echo "SERVICE_PORT=$SERVICE_PORT" >> "$GITHUB_ENV"
 
 
-      # Test through Kubernetes DNS -> Service -> Pod.
+      # Test through Kubernetes DNS -> Service -> Pod....
       - name: Validate User Service health
         run: |
           TEST_POD="userservice-health-${GITHUB_RUN_ID}"
