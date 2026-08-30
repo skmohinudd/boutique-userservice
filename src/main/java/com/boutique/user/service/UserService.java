@@ -53,12 +53,13 @@ public class UserService {
     @Transactional
     public UserResponse syncCognitoUser(String cognitoSub, String email, CreateUserRequest request) {
         String normalizedSub = normalizeRequired(cognitoSub, "Cognito subject");
-        String normalizedEmail = normalizeEmail(email);
 
         var bySub = userRepository.findByCognitoSub(normalizedSub);
         if (bySub.isPresent()) {
             return toResponse(bySub.get());
         }
+
+        String normalizedEmail = normalizeEmail(email);
 
         var byEmail = userRepository.findByEmailIgnoreCase(normalizedEmail);
         if (byEmail.isPresent()) {

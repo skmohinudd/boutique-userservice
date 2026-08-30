@@ -9,3 +9,6 @@ management:
     web:
       exposure:
         include: health,info,prometheus
+
+cognito:
+  user-info-uri: ${COGNITO_USERINFO_URI:}

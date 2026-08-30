@@ -1,5 +1,7 @@
 package com.boutique.user.controller;
 
+import com.boutique.user.auth.CognitoUserInfoClient;
+
 import com.boutique.user.dto.CreateUserRequest;
 import com.boutique.user.dto.UpdateUserRequest;
 import com.boutique.user.dto.UserResponse;
@@ -19,9 +21,11 @@ import java.util.UUID;
 public class UserController {
 
     private final UserService userService;
+    private final CognitoUserInfoClient cognitoUserInfoClient;
 
-    public UserController(UserService userService) {
+    public UserController(UserService userService, CognitoUserInfoClient cognitoUserInfoClient) {
         this.userService = userService;
+        this.cognitoUserInfoClient = cognitoUserInfoClient;
     }
 
     @PostMapping
@@ -39,6 +43,9 @@ public class UserController {
     ) {
         String subject = jwt.getSubject();
         String email = jwt.getClaimAsString("email");
+        if (email == null || email.isBlank()) {
+            email = cognitoUserInfoClient.verifiedEmail(jwt.getTokenValue());
+        }
         return userService.syncCognitoUser(subject, email, request);
     }
 
