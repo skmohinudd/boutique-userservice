@@ -7,6 +7,8 @@ import com.boutique.user.service.UserService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.*;
 
 import java.net.URI;
@@ -27,6 +29,17 @@ public class UserController {
         UserResponse response = userService.createUser(request);
         URI location = URI.create("/api/v1/users/" + response.id());
         return ResponseEntity.created(location).body(response);
+    }
+
+    // Uses the verified JWT as identity source, making repeated login/profile sync idempotent.
+    @PostMapping("/me")
+    public UserResponse syncCurrentUser(
+            @AuthenticationPrincipal Jwt jwt,
+            @Valid @RequestBody CreateUserRequest request
+    ) {
+        String subject = jwt.getSubject();
+        String email = jwt.getClaimAsString("email");
+        return userService.syncCognitoUser(subject, email, request);
     }
 
     @GetMapping("/{userId}")

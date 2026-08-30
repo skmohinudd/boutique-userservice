@@ -89,6 +89,13 @@ public class User {
         this.phoneNumber = phoneNumber;
     }
 
+    public void linkCognitoIdentity(String cognitoSub) {
+        if (this.cognitoSub != null && !this.cognitoSub.equals(cognitoSub)) {
+            throw new IllegalStateException("User is already linked to a different Cognito identity.");
+        }
+        this.cognitoSub = cognitoSub;
+    }
+
     public void deactivate() {
         this.status = UserStatus.INACTIVE;
     }

@@ -41,14 +41,51 @@ public class UserService {
         );
 
         try {
-            // The database UNIQUE constraints are authoritative and race-safe.
-            // saveAndFlush forces duplicate detection inside this request instead
-            // of issuing two existence SELECTs before every INSERT.
             return toResponse(userRepository.saveAndFlush(user));
         } catch (DataIntegrityViolationException exception) {
             throw new DuplicateUserException(
                     "A user already exists with the supplied email or Cognito identity."
             );
+        }
+    }
+
+    // Idempotent Cognito profile sync: return by sub, link legacy profile by email, otherwise create once.
+    @Transactional
+    public UserResponse syncCognitoUser(String cognitoSub, String email, CreateUserRequest request) {
+        String normalizedSub = normalizeRequired(cognitoSub, "Cognito subject");
+        String normalizedEmail = normalizeEmail(email);
+
+        var bySub = userRepository.findByCognitoSub(normalizedSub);
+        if (bySub.isPresent()) {
+            return toResponse(bySub.get());
+        }
+
+        var byEmail = userRepository.findByEmailIgnoreCase(normalizedEmail);
+        if (byEmail.isPresent()) {
+            User existing = byEmail.get();
+            existing.linkCognitoIdentity(normalizedSub);
+            return toResponse(userRepository.saveAndFlush(existing));
+        }
+
+        User user = new User(
+                UUID.randomUUID(),
+                normalizedSub,
+                normalizedEmail,
+                request.firstName().trim(),
+                request.lastName().trim(),
+                normalizeNullable(request.phoneNumber()),
+                UserStatus.ACTIVE
+        );
+
+        try {
+            return toResponse(userRepository.saveAndFlush(user));
+        } catch (DataIntegrityViolationException exception) {
+            return userRepository.findByCognitoSub(normalizedSub)
+                    .or(() -> userRepository.findByEmailIgnoreCase(normalizedEmail))
+                    .map(this::toResponse)
+                    .orElseThrow(() -> new DuplicateUserException(
+                            "The user profile could not be linked safely. Please retry."
+                    ));
         }
     }
 
@@ -92,7 +129,14 @@ public class UserService {
     }
 
     private String normalizeEmail(String value) {
-        return value.trim().toLowerCase(Locale.ROOT);
+        return normalizeRequired(value, "Email").toLowerCase(Locale.ROOT);
+    }
+
+    private String normalizeRequired(String value, String field) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(field + " is required.");
+        }
+        return value.trim();
     }
 
     private String normalizeNullable(String value) {
