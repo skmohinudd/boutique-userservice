@@ -1,5 +1,6 @@
 package com.boutique.user.controller;
 
+import com.boutique.user.auth.CognitoUserInfoClient;
 import com.boutique.user.dto.UserResponse;
 import com.boutique.user.entity.UserStatus;
 import com.boutique.user.service.UserService;
@@ -19,14 +20,27 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 class UserControllerTest {
 
-    private final UserService userService = mock(UserService.class);
-    private final MockMvc mockMvc = MockMvcBuilders
-            .standaloneSetup(new UserController(userService))
-            .build();
+    private final UserService userService =
+            mock(UserService.class);
+
+    private final CognitoUserInfoClient cognitoUserInfoClient =
+            mock(CognitoUserInfoClient.class);
+
+    private final MockMvc mockMvc =
+            MockMvcBuilders
+                    .standaloneSetup(
+                            new UserController(
+                                    userService,
+                                    cognitoUserInfoClient
+                            )
+                    )
+                    .build();
 
     @Test
     void createUserReturns201AndLocation() throws Exception {
+
         UUID id = UUID.randomUUID();
+
         UserResponse response = new UserResponse(
                 id,
                 "khaja@example.com",
@@ -39,19 +53,30 @@ class UserControllerTest {
                 0
         );
 
-        when(userService.createUser(any())).thenReturn(response);
+        when(userService.createUser(any()))
+                .thenReturn(response);
 
-        mockMvc.perform(post("/api/v1/users")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {
-                                  "email": "khaja@example.com",
-                                  "firstName": "Khaja",
-                                  "lastName": "Mohinuddin"
-                                }
-                                """))
+        mockMvc.perform(
+                        post("/api/v1/users")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("""
+                                        {
+                                          "email": "khaja@example.com",
+                                          "firstName": "Khaja",
+                                          "lastName": "Mohinuddin"
+                                        }
+                                        """)
+                )
                 .andExpect(status().isCreated())
-                .andExpect(header().string("Location", "/api/v1/users/" + id))
-                .andExpect(jsonPath("$.email").value("khaja@example.com"));
+                .andExpect(
+                        header().string(
+                                "Location",
+                                "/api/v1/users/" + id
+                        )
+                )
+                .andExpect(
+                        jsonPath("$.email")
+                                .value("khaja@example.com")
+                );
     }
 }
