@@ -1,7 +1,6 @@
 package com.boutique.user.controller;
 
 import com.boutique.user.auth.CognitoUserInfoClient;
-
 import com.boutique.user.dto.CreateUserRequest;
 import com.boutique.user.dto.UpdateUserRequest;
 import com.boutique.user.dto.UserResponse;
@@ -23,34 +22,54 @@ public class UserController {
     private final UserService userService;
     private final CognitoUserInfoClient cognitoUserInfoClient;
 
-    public UserController(UserService userService, CognitoUserInfoClient cognitoUserInfoClient) {
+    public UserController(
+            UserService userService,
+            CognitoUserInfoClient cognitoUserInfoClient
+    ) {
         this.userService = userService;
         this.cognitoUserInfoClient = cognitoUserInfoClient;
     }
 
     @PostMapping
-    public ResponseEntity<UserResponse> createUser(@Valid @RequestBody CreateUserRequest request) {
+    public ResponseEntity<UserResponse> createUser(
+            @Valid @RequestBody CreateUserRequest request
+    ) {
         UserResponse response = userService.createUser(request);
-        URI location = URI.create("/api/v1/users/" + response.id());
-        return ResponseEntity.created(location).body(response);
+
+        URI location = URI.create(
+                "/api/v1/users/" + response.id()
+        );
+
+        return ResponseEntity
+                .created(location)
+                .body(response);
     }
 
-    // Uses the verified JWT as identity source, making repeated login/profile sync idempotent.
     @PostMapping("/me")
     public UserResponse syncCurrentUser(
             @AuthenticationPrincipal Jwt jwt,
             @Valid @RequestBody CreateUserRequest request
     ) {
         String subject = jwt.getSubject();
+
         String email = jwt.getClaimAsString("email");
+
         if (email == null || email.isBlank()) {
-            email = cognitoUserInfoClient.verifiedEmail(jwt.getTokenValue());
+            email = cognitoUserInfoClient
+                    .verifiedEmail(jwt.getTokenValue());
         }
-        return userService.syncCognitoUser(subject, email, request);
+
+        return userService.syncCognitoUser(
+                subject,
+                email,
+                request
+        );
     }
 
     @GetMapping("/{userId}")
-    public UserResponse getUser(@PathVariable UUID userId) {
+    public UserResponse getUser(
+            @PathVariable UUID userId
+    ) {
         return userService.getUser(userId);
     }
 
@@ -59,12 +78,17 @@ public class UserController {
             @PathVariable UUID userId,
             @Valid @RequestBody UpdateUserRequest request
     ) {
-        return userService.updateUser(userId, request);
+        return userService.updateUser(
+                userId,
+                request
+        );
     }
 
     @PostMapping("/{userId}/deactivate")
     @ResponseStatus(HttpStatus.OK)
-    public UserResponse deactivateUser(@PathVariable UUID userId) {
+    public UserResponse deactivateUser(
+            @PathVariable UUID userId
+    ) {
         return userService.deactivateUser(userId);
     }
 }
